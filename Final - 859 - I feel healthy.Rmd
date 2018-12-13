@@ -1,0 +1,308 @@
+---
+title: "859 Project - Health Feeling Score Predicting GPA"
+author: Katie Groh
+date:
+output: html_notebook
+---
+
+
+
+
+
+## Read and Visualize Data
+```{r}
+library(caret)
+library(tidyverse)
+library(skimr)
+library(lme4) # Foy
+#yr the sleep study data
+library(caret)
+library(kernlab)
+library(ipred)
+library(ggpubr)
+
+library(ROCR)
+library(pROC)
+library(plotROC)
+library(ggiraph)
+#devtools::install_github("thomasp85/patchwork")
+#install.packages("devtools")
+#devtools::install_github("thomasp85/patchwork")
+library(patchwork) # For combining multiple plots with ggiraph
+#library(cowplot)
+
+library(plotly)
+library(gapminder)
+library(tidyverse)
+
+library(ggplot2)
+library(dplyr)
+library(ggthemes)
+
+smart_food <- food_coded %>% 
+  mutate(numeric_gpa = as.numeric(GPA)) %>% 
+    filter(!is.na(numeric_gpa)) %>% 
+   mutate(numeric_weight = as.numeric(weight)) %>% 
+    filter(!is.na(numeric_weight))
+smart_food <- subset(smart_food, select = -c(comfort_food, comfort_food_reasons, diet_current, eating_changes, father_profession, fav_cuisine, food_childhood, healthy_meal, ideal_diet, meals_dinner_friend, mother_profession, type_sports, GPA, weight, comfort_food_reasons_coded, calories_day, calories_scone, cook, cuisine, drink, employment, exercise, father_education, fav_food, marital_status, mother_education, on_off_campus, persian_food, self_perception_weight, sports, tortilla_calories, soup ))
+
+
+small_food <- na.exclude(smart_food)
+final_gpa <-  cut(smart_food$numeric_gpa, c(0,2,2.5,3,3.5,4)) 
+
+males <- filter(smart_food, Gender == 2)
+females <- filter(smart_food, Gender == 1)
+
+
+skim(smart_food)
+```
+
+
+## Read and Visualize Data
+#Come back to this...need to figure out which columns to use
+```{r}
+featurePlot(x = smart_food[, ], y = smart_food$healthy_feeling, 
+            plot = "scatter",
+            type = c("p", "smooth"), span = .5,
+            layout = c(2, 2))
+
+```
+
+
+## Define Class Variable{.smaller} 
+
+```{r}
+healthy_living = smart_food %>% mutate(goodlife = if_else(healthy_feeling>5, "good", "bad")) %>% 
+  mutate(goodlife = as.factor(goodlife))
+ggplot(healthy_living, aes(goodlife, healthy_feeling, colour = goodlife, fill = goodlife))+
+  geom_point(size = 1, alpha = .7, position = position_jitter(height = 0.1))+
+  #labs(x = "Discretized wine quality", y = "Rated wine quality")+
+  theme(legend.position = "none")
+smart_food = healthy_living %>% select(-healthy_feeling)
+```
+
+
+
+
+
+## Partition Data into Training and Testing
+```{r}
+inTrain = createDataPartition(smart_food$goodlife, p = 3/4, list = FALSE)
+trainDescr = smart_food[inTrain, -31] # All but class variable
+testDescr = smart_food[-inTrain, -31]
+trainClass = smart_food$goodlife[inTrain] 
+testClass = smart_food$goodlife[-inTrain]
+```
+
+
+
+## Partition Data into Training and Testing
+
+```{r}
+smart_food$goodlife %>%  table() %>% prop.table() %>% round(3)*100 
+trainClass %>% table() %>% prop.table() %>% round(3)*100
+testClass %>% table() %>% prop.table() %>% round(3)*100
+```
+
+## Pre-process Data: Normalization
+
+```{r}
+xTrans = preProcess(trainDescr, method = c("center", "scale")) 
+trainScaled = predict(xTrans, trainDescr)
+testScaled = predict(xTrans, testDescr)
+```
+
+
+## Pre-process Data: Normalization
+```{r}
+raw.plot = ggplot(trainDescr, aes(numeric_gpa))+geom_histogram()
+scaled.plot = ggplot(trainScaled, aes(numeric_gpa))+geom_histogram()
+ggarrange(raw.plot, scaled.plot, 
+          labels = c("Original", "Normalized"),
+          nrow=2, ncol = 1, align = "v")
+```
+
+
+
+
+## Define Training Parameters: ``trainControl``
+```{r tune, echo=TRUE}
+train_control = trainControl(method = "repeatedcv", 
+                              number = 10, repeats = 3, # number: number of folds
+                              search = "grid", # for tuning hyperparameters
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary)
+```
+
+
+
+## Train Models and Tune Hyperparameters: Logistic regression{.smaller}
+```{r, train_glm, cache = TRUE, echo=TRUE, warning=FALSE}
+glm.fit = train(x = trainScaled, y = trainClass,
+   method = 'glm', metric = "ROC",
+   trControl = train_control) 
+glm.fit
+```
+
+
+
+## Train Models and Tune Hyperparameters: Support vector machine{.smaller}
+```{r, train_svm, cache=TRUE,  echo=TRUE, message=FALSE, warning=FALSE, fig.height=3}
+# for (i in colnames(healthy_living[, sapply(healthy_living, is.factor)])){
+#     for (level in unique(healthy_living[, i])){
+#         healthy_living[paste(i, level, sep = "_")] = 
+#             as.integer(ifelse(healthy_living[, i] == level, 1, -1))
+#     }
+# }
+grid = expand.grid(C = c(.1, .2, .4, 1, 2, 4))
+svm.fit =  train(x = trainScaled, y = trainClass,
+  method = "svmLinear", metric = "ROC",
+  tuneGrid = grid, 
+  tuneLength = 3, 
+  trControl = train_control, scaled = TRUE)
+plot(svm.fit)
+```
+
+
+
+## Train models and tune Hyperparameters: xgboost
+```{r, train_xgb, echo=TRUE, cache=TRUE, warning=FALSE, message=FALSE}
+library(xgboost)
+
+xgb.fit = train(x = trainScaled, y = trainClass, 
+  method = "xgbTree", metric = "ROC",
+  tuneLength = 3, # Depends on number of parameters in algorithm
+  trControl = train_control, scaled = TRUE)
+```
+
+
+## Train models and tune: xgboost
+```{r, plot_train_xgb, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE, fig.height=4.5}
+plot(xgb.fit)
+```
+
+  
+## Assess Performance: Confusion matrix (glm)
+```{r, assess-glm,  echo=TRUE}
+
+glm.pred = predict(glm.fit, testScaled)
+confusionMatrix(glm.pred, testClass)
+```
+
+
+## Assess Performance: Confusion matrix (svm)
+```{r, assess-svm,  echo=TRUE}
+svm.pred = predict(svm.fit, testScaled)
+confusionMatrix(svm.pred, testClass)
+```
+
+
+## Assess Performance: Confusion matrix (xgb)
+```{r, assess-xgb,  echo=TRUE}
+xgb.pred = predict(xgb.fit, testScaled)
+confusionMatrix(xgb.pred, testClass)
+```
+
+
+## Compare Models
+```{r, compare_boxplot, cache=TRUE, echo=TRUE}
+mod.resamps = resamples(list(glm = glm.fit, svm = svm.fit, xgb = xgb.fit))
+bwplot(mod.resamps, metric="ROC")
+dotplot(mod.resamps, metric="ROC")
+```
+
+
+## Assess Performance (xgb): ROC plot{.smaller}
+```{r, assess_ROC, warning=FALSE, echo=FALSE, out.width="90%"}
+xgb.pred = predict(xgb.fit, testScaled, type="prob")
+xgb.roc = roc(predictor = xgb.pred$good, 
+              response = testClass, 
+              AUC = TRUE, ci = TRUE)
+xgb.roc.df = data.frame(obs = xgb.roc$original.response, pred = xgb.roc$predictor)
+xgb.roc.plot = 
+ggplot(xgb.roc.df, aes(d = obs, m = pred)) + 
+  geom_roc(labels = FALSE, linealpha = .8) + # Labels show the predictor value
+   annotate("text", x = .5, y = .475, hjust = 0,
+           label = paste("AUC(xbg) =", round(xgb.roc$auc, 2))) +
+  labs(title = "Prediction of good and bad health", 
+       subtitle = "Extreme gradient boosting predictions (xgboost)") +
+  coord_fixed(ratio = 1) +
+  style_roc() 
+  
+xgb.roc.plot
+ggsave("xgb-roc.png", xgb.roc.plot, width = 5, height = 4.5)
+```
+
+
+## xgboost Predictions
+```{r, xgb-pred-plot, out.width="90%"}
+#xgb.pred.df = cbind(xgb.pred, testScaled)
+# xgb.pred.df = cbind(xgb.pred, testClass)
+# xgb.pred.df = cbind(xgb.pred.df, testDescr)
+# 
+# xgb.pred.plot = ggplot(xgb.pred.df, aes(alcohol, good, color = testClass))+
+#   geom_point()+
+#   labs(title = "Prediction of good and bad wines", 
+#        subtitle = "Extreme gradient boosting predictions (xgboost)",
+#        x = "Alcohol content (%)",
+#        y = "Predicted probabilty the wine is good",
+#        colour= "Rated wine quality")
+# xgb.pred.plot
+# ggsave("xgb-pred.png", xgb.pred.plot, width = 5, height = 4.5)
+predicted.df = cbind(xgb.pred, healthy_living[-inTrain, ])
+library(ggforce)
+predicted_health.plot = 
+  ggplot(predicted.df, aes(as.factor(healthy_feeling), good, colour = goodlife)) + 
+  geom_sina() +
+  labs(title = "Prediction of good and bad health", 
+       subtitle = "Extreme gradient boosting predictions (xgboost)",
+       x = "Rated health feeling",
+       y = "Predicted probabilty the health is good") +
+  theme_gray(base_size = 14) +
+  theme(legend.position="bottom") 
+predicted_health.plot
+ggsave(filename = "predicted_health.png", plot = predicted_health.plot, width = 5, height = 4.5)
+```
+
+
+## Assess Variable Importance: glm and xgb{.columns-2}
+```{r, assess-var-glm, fig.width=5, fig.height=5}
+  plot(varImp(glm.fit, scale = TRUE), main = "glm")
+```
+
+```{r, assess-var-xgb, fig.width=5, fig.height=5}
+  plot(varImp(xgb.fit, scale = TRUE), main = "xgb")
+```
+```{r}
+
+library(lime)
+explainer <- lime(trainScaled, svm.fit, bin_continuous = TRUE, quantile_bins = FALSE)
+explanation <- explain(testScaled, explainer, n_labels = 1, n_features = 4)
+# Only showing part of output for better printing
+explanation[,]
+
+plot_features(explanation, ncol = 1)
+```
+
+```{r}
+library(lime)
+explainer <- lime(trainScaled, xgb.fit, bin_continuous = TRUE, quantile_bins = FALSE)
+explanation <- explain(testScaled, explainer, n_labels = 1, n_features = 4)
+# Only showing part of output for better printing
+explanation[,]
+
+plot_features(explanation, ncol = 1)
+```
+
+```{r}
+library(lime)
+explainer <- lime(trainScaled, glm.fit, bin_continuous = TRUE, quantile_bins = FALSE)
+explanation <- explain(testScaled, explainer, n_labels = 1, n_features = 4)
+# Only showing part of output for better printing
+explanation[,]
+
+plot_features(explanation, ncol = 1)
+plot_explanations(explanation, ncol=1)
+```
+
